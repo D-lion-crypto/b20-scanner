@@ -21,7 +21,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/YOUR_NAME/b20-scanner.git
+git clone https://github.com/D-lion-crypto/b20-scanner.git
 cd b20-scanner
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
@@ -138,4 +138,3 @@ POST https://api.cdp.coinbase.com/platform/v2/data/query/run
 ## 许可证
 
 MIT
-
