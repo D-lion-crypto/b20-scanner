@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+env/
+
+# Local scan outputs
+b20_tokens.csv
+b20_tokens.json
+b20_tokens.html
+
+# Local secrets / environment
+.env
+*.key
+*.pem
+cdp-key*.json
+cdp*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
