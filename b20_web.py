@@ -86,8 +86,11 @@ INDEX_HTML = """<!doctype html>
     p { color: #555; margin: 0 0 18px; }
     section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
     label { display: grid; gap: 6px; font-size: 13px; font-weight: 650; }
-    input, select { min-height: 36px; padding: 0 10px; border: 1px solid #b8bdc3; border-radius: 6px; font: inherit; background: #fff; }
+    input, select, textarea { min-height: 36px; padding: 0 10px; border: 1px solid #b8bdc3; border-radius: 6px; font: inherit; background: #fff; }
+    textarea { min-height: 110px; padding: 10px; resize: vertical; font-family: Consolas, ui-monospace, monospace; font-size: 12px; }
     .grid { display: grid; grid-template-columns: minmax(320px, 2fr) repeat(4, minmax(120px, 1fr)); gap: 12px; align-items: end; }
+    .launchGrid { display: grid; grid-template-columns: minmax(260px, 1.2fr) minmax(160px, .7fr); gap: 12px; align-items: end; }
+    .full { grid-column: 1 / -1; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
     button, a.button { min-height: 36px; padding: 0 14px; border: 1px solid #1f2937; border-radius: 6px; background: #111827; color: #fff; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; font-weight: 650; }
     button.secondary, a.secondary { background: #fff; color: #111827; border-color: #b8bdc3; }
@@ -108,7 +111,7 @@ INDEX_HTML = """<!doctype html>
     .ok { color: #067647; }
     .bad { color: #b42318; }
     .muted { color: #667085; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } main { padding: 14px; } }
+    @media (max-width: 900px) { .grid, .launchGrid { grid-template-columns: 1fr; } .full { grid-column: auto; } main { padding: 14px; } }
   </style>
 </head>
 <body>
@@ -179,6 +182,28 @@ INDEX_HTML = """<!doctype html>
   </section>
 
   <section>
+    <h2>上线后自动提交部署交易</h2>
+    <div class="launchGrid">
+      <label>launchB20 合约地址
+        <input id="launchTo" placeholder="0x274D92df0d1CEfF9080360191feE0d3299c21B49" />
+      </label>
+      <label>交易 value（ETH）
+        <input id="launchValueEth" value="0.01" inputmode="decimal" />
+      </label>
+      <label class="full">launchB20 calldata
+        <textarea id="launchCalldata" placeholder="0x..."></textarea>
+      </label>
+    </div>
+    <div class="row">
+      <button class="secondary" onclick="connectWallet()">连接钱包</button>
+      <button id="armLaunchBtn" onclick="enableAutoLaunch()">启用上线后自动提交</button>
+      <button id="disarmLaunchBtn" class="secondary" onclick="disableAutoLaunch()" disabled>停止自动提交</button>
+      <span id="walletStatus" class="muted">钱包未连接</span>
+      <span id="launchStatus" class="muted">等待启用</span>
+    </div>
+  </section>
+
+  <section>
     <div class="row" style="margin-top:0; justify-content:space-between;">
       <div><span class="pill" id="count">0 个代币</span></div>
       <input id="filter" placeholder="按名称、符号、合约地址或风险提示过滤" oninput="renderTable()" style="width:min(520px, 90vw)" />
@@ -202,6 +227,9 @@ INDEX_HTML = """<!doctype html>
 <script>
 let tokens = [];
 let pollTimer = null;
+let walletAccount = '';
+let autoLaunchEnabled = false;
+let autoLaunchTriggered = false;
 
 function toggleMode() {
   const mode = document.getElementById('mode').value;
@@ -260,6 +288,7 @@ async function checkActivation() {
   setActivationText('assetStatus', data.asset);
   setActivationText('stableStatus', data.stablecoin);
   document.getElementById('activationBlock').textContent = data.block_number || '-';
+  await maybeAutoLaunch(data);
 }
 
 function setActivationText(id, active) {
@@ -321,6 +350,14 @@ async function addToken(address, symbol, decimals) {
     alert('没有检测到浏览器钱包，请先安装或启用钱包插件。');
     return;
   }
+  await ensureBaseChain();
+  await window.ethereum.request({
+    method: 'wallet_watchAsset',
+    params: { type: 'ERC20', options: { address, symbol, decimals } }
+  });
+}
+
+async function ensureBaseChain() {
   await window.ethereum.request({
     method: 'wallet_switchEthereumChain',
     params: [{ chainId: '0x2105' }],
@@ -340,10 +377,107 @@ async function addToken(address, symbol, decimals) {
       throw err;
     }
   });
-  await window.ethereum.request({
-    method: 'wallet_watchAsset',
-    params: { type: 'ERC20', options: { address, symbol, decimals } }
-  });
+}
+
+async function connectWallet() {
+  if (!window.ethereum) {
+    alert('没有检测到浏览器钱包，请先安装或启用钱包插件。');
+    return;
+  }
+  await ensureBaseChain();
+  const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+  walletAccount = accounts && accounts[0] ? accounts[0] : '';
+  document.getElementById('walletStatus').textContent = walletAccount ? `已连接 ${shortAddress(walletAccount)}` : '钱包未连接';
+  document.getElementById('walletStatus').className = walletAccount ? 'ok' : 'bad';
+}
+
+async function enableAutoLaunch() {
+  const to = document.getElementById('launchTo').value.trim();
+  const data = document.getElementById('launchCalldata').value.trim();
+  try {
+    if (!isAddress(to)) throw new Error('launchB20 合约地址不正确');
+    normalizeHexData(data);
+    ethToWeiHex(document.getElementById('launchValueEth').value.trim() || '0');
+    if (!walletAccount) await connectWallet();
+    if (!walletAccount) throw new Error('钱包未连接');
+    autoLaunchEnabled = true;
+    autoLaunchTriggered = false;
+    updateLaunchButtons();
+    setLaunchStatus('已启用：检测到 B20 Asset 上线后会自动弹出钱包确认', 'ok');
+  } catch (err) {
+    setLaunchStatus(err.message || String(err), 'bad');
+  }
+}
+
+function disableAutoLaunch() {
+  autoLaunchEnabled = false;
+  autoLaunchTriggered = false;
+  updateLaunchButtons();
+  setLaunchStatus('已停止自动提交', 'muted');
+}
+
+async function maybeAutoLaunch(data) {
+  if (!autoLaunchEnabled || autoLaunchTriggered || !data.asset) return;
+  autoLaunchTriggered = true;
+  autoLaunchEnabled = false;
+  updateLaunchButtons();
+  setLaunchStatus('B20 Asset 已上线，正在请求钱包确认...', 'ok');
+  try {
+    if (!window.ethereum) throw new Error('没有检测到浏览器钱包');
+    await ensureBaseChain();
+    if (!walletAccount) {
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      walletAccount = accounts && accounts[0] ? accounts[0] : '';
+    }
+    const tx = {
+      from: walletAccount,
+      to: document.getElementById('launchTo').value.trim(),
+      data: normalizeHexData(document.getElementById('launchCalldata').value.trim()),
+      value: ethToWeiHex(document.getElementById('launchValueEth').value.trim() || '0')
+    };
+    const hash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [tx] });
+    setLaunchStatus(`已提交交易：${hash}`, 'ok');
+  } catch (err) {
+    autoLaunchEnabled = false;
+    autoLaunchTriggered = false;
+    updateLaunchButtons();
+    setLaunchStatus(`提交失败，已停止自动提交：${err.message || err}`, 'bad');
+  }
+}
+
+function updateLaunchButtons() {
+  document.getElementById('armLaunchBtn').disabled = autoLaunchEnabled || autoLaunchTriggered;
+  document.getElementById('disarmLaunchBtn').disabled = !autoLaunchEnabled;
+}
+
+function setLaunchStatus(text, className) {
+  const el = document.getElementById('launchStatus');
+  el.textContent = text;
+  el.className = className || 'muted';
+}
+
+function isAddress(value) {
+  return /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
+function normalizeHexData(value) {
+  const compact = String(value || '').replace(/\\s+/g, '');
+  if (!/^0x[a-fA-F0-9]*$/.test(compact) || compact.length < 10 || compact.length % 2 !== 0) {
+    throw new Error('calldata 必须是 0x 开头的十六进制数据');
+  }
+  return compact;
+}
+
+function ethToWeiHex(value) {
+  const text = String(value || '0').trim();
+  if (!/^\\d+(\\.\\d{0,18})?$/.test(text)) throw new Error('value ETH 格式不正确');
+  const [whole, fraction = ''] = text.split('.');
+  const wei = BigInt(whole || '0') * 10n ** 18n + BigInt((fraction + '0'.repeat(18)).slice(0, 18));
+  return '0x' + wei.toString(16);
+}
+
+function shortAddress(address) {
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
 function escapeHtml(value) {
@@ -355,7 +489,7 @@ function escapeAttr(value) {
 
 loadResults();
 checkActivation();
-setInterval(checkActivation, 10000);
+setInterval(checkActivation, 3000);
 </script>
 </body>
 </html>
