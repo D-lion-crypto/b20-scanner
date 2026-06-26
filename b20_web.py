@@ -182,22 +182,25 @@ INDEX_HTML = """<!doctype html>
   </section>
 
   <section>
-    <h2>上线后自动提交部署交易</h2>
+    <h2>上线后直接创建官方 B20 Asset</h2>
     <div class="launchGrid">
-      <label>launchB20 合约地址
-        <input id="launchTo" placeholder="0x274D92df0d1CEfF9080360191feE0d3299c21B49" />
+      <label>B20 名称
+        <input id="directName" value="B20" />
       </label>
-      <label>交易 value（ETH）
-        <input id="launchValueEth" value="0.01" inputmode="decimal" />
+      <label>B20 符号
+        <input id="directSymbol" value="B20" />
       </label>
-      <label class="full">launchB20 calldata
-        <textarea id="launchCalldata" placeholder="0x..."></textarea>
+      <label>精度
+        <input id="directDecimals" value="18" inputmode="numeric" />
+      </label>
+      <label class="full">salt（bytes32，留空自动生成）
+        <input id="directSalt" placeholder="0x..." />
       </label>
     </div>
     <div class="row">
       <button class="secondary" onclick="connectWallet()">连接钱包</button>
-      <button id="armLaunchBtn" onclick="enableAutoLaunch()">启用上线后自动提交</button>
-      <button id="disarmLaunchBtn" class="secondary" onclick="disableAutoLaunch()" disabled>停止自动提交</button>
+      <button id="armLaunchBtn" onclick="enableAutoLaunch()">启用上线后自动创建</button>
+      <button id="disarmLaunchBtn" class="secondary" onclick="disableAutoLaunch()" disabled>停止自动创建</button>
       <span id="walletStatus" class="muted">钱包未连接</span>
       <span id="launchStatus" class="muted">等待启用</span>
     </div>
@@ -230,6 +233,8 @@ let pollTimer = null;
 let walletAccount = '';
 let autoLaunchEnabled = false;
 let autoLaunchTriggered = false;
+let armedDirectB20 = null;
+const B20_FACTORY = '0xB20f000000000000000000000000000000000000';
 
 function toggleMode() {
   const mode = document.getElementById('mode').value;
@@ -392,18 +397,14 @@ async function connectWallet() {
 }
 
 async function enableAutoLaunch() {
-  const to = document.getElementById('launchTo').value.trim();
-  const data = document.getElementById('launchCalldata').value.trim();
   try {
-    if (!isAddress(to)) throw new Error('launchB20 合约地址不正确');
-    normalizeHexData(data);
-    ethToWeiHex(document.getElementById('launchValueEth').value.trim() || '0');
     if (!walletAccount) await connectWallet();
     if (!walletAccount) throw new Error('钱包未连接');
+    armedDirectB20 = readDirectB20Config();
     autoLaunchEnabled = true;
     autoLaunchTriggered = false;
     updateLaunchButtons();
-    setLaunchStatus('已启用：检测到 B20 Asset 上线后会自动弹出钱包确认', 'ok');
+    setLaunchStatus(`已启用：上线后直接调用官方 B20Factory 创建 ${armedDirectB20.symbol}`, 'ok');
   } catch (err) {
     setLaunchStatus(err.message || String(err), 'bad');
   }
@@ -412,8 +413,9 @@ async function enableAutoLaunch() {
 function disableAutoLaunch() {
   autoLaunchEnabled = false;
   autoLaunchTriggered = false;
+  armedDirectB20 = null;
   updateLaunchButtons();
-  setLaunchStatus('已停止自动提交', 'muted');
+  setLaunchStatus('已停止自动创建', 'muted');
 }
 
 async function maybeAutoLaunch(data) {
@@ -429,11 +431,13 @@ async function maybeAutoLaunch(data) {
       const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
       walletAccount = accounts && accounts[0] ? accounts[0] : '';
     }
+    const config = armedDirectB20 || readDirectB20Config();
+    const calldata = encodeCreateB20Asset(config.name, config.symbol, walletAccount, config.decimals, config.salt);
     const tx = {
       from: walletAccount,
-      to: document.getElementById('launchTo').value.trim(),
-      data: normalizeHexData(document.getElementById('launchCalldata').value.trim()),
-      value: ethToWeiHex(document.getElementById('launchValueEth').value.trim() || '0')
+      to: B20_FACTORY,
+      data: calldata,
+      value: '0x0'
     };
     const hash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [tx] });
     setLaunchStatus(`已提交交易：${hash}`, 'ok');
@@ -460,24 +464,91 @@ function isAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(value);
 }
 
-function normalizeHexData(value) {
-  const compact = String(value || '').replace(/\\s+/g, '');
-  if (!/^0x[a-fA-F0-9]*$/.test(compact) || compact.length < 10 || compact.length % 2 !== 0) {
-    throw new Error('calldata 必须是 0x 开头的十六进制数据');
-  }
-  return compact;
-}
-
-function ethToWeiHex(value) {
-  const text = String(value || '0').trim();
-  if (!/^\\d+(\\.\\d{0,18})?$/.test(text)) throw new Error('value ETH 格式不正确');
-  const [whole, fraction = ''] = text.split('.');
-  const wei = BigInt(whole || '0') * 10n ** 18n + BigInt((fraction + '0'.repeat(18)).slice(0, 18));
-  return '0x' + wei.toString(16);
-}
-
 function shortAddress(address) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function readDirectB20Config() {
+  const name = document.getElementById('directName').value.trim();
+  const symbol = document.getElementById('directSymbol').value.trim();
+  const decimals = Number(document.getElementById('directDecimals').value || 18);
+  let salt = document.getElementById('directSalt').value.trim();
+  if (!name) throw new Error('B20 名称不能为空');
+  if (!symbol) throw new Error('B20 符号不能为空');
+  if (!Number.isInteger(decimals) || decimals < 6 || decimals > 18) throw new Error('Asset 精度必须是 6 到 18');
+  if (!salt) {
+    salt = randomBytes32();
+    document.getElementById('directSalt').value = salt;
+  }
+  if (!/^0x[a-fA-F0-9]{64}$/.test(salt)) throw new Error('salt 必须是 0x 开头的 32 字节十六进制');
+  return { name, symbol, decimals, salt };
+}
+
+function randomBytes32() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return '0x' + [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function encodeCreateB20Asset(name, symbol, initialAdmin, decimals, salt) {
+  const params = encodeAssetCreateParams(name, symbol, initialAdmin, decimals);
+  const paramsPart = encodeBytes(params);
+  const initCallsPart = word(0);
+  const paramsOffset = 32n * 4n;
+  const initCallsOffset = paramsOffset + BigInt(byteLength(paramsPart));
+  return '0x62975e6a'
+    + word(0).slice(2)
+    + cleanHex(salt)
+    + word(paramsOffset).slice(2)
+    + word(initCallsOffset).slice(2)
+    + paramsPart.slice(2)
+    + initCallsPart.slice(2);
+}
+
+function encodeAssetCreateParams(name, symbol, initialAdmin, decimals) {
+  const namePart = encodeString(name);
+  const symbolPart = encodeString(symbol);
+  const nameOffset = 32n * 5n;
+  const symbolOffset = nameOffset + BigInt(byteLength(namePart));
+  return '0x'
+    + word(1).slice(2)
+    + word(nameOffset).slice(2)
+    + word(symbolOffset).slice(2)
+    + wordAddress(initialAdmin).slice(2)
+    + word(decimals).slice(2)
+    + namePart.slice(2)
+    + symbolPart.slice(2);
+}
+
+function encodeString(value) {
+  const bytes = new TextEncoder().encode(value);
+  const hex = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+  return encodeBytes('0x' + hex);
+}
+
+function encodeBytes(hexValue) {
+  const clean = cleanHex(hexValue);
+  const len = BigInt(clean.length / 2);
+  return word(len) + clean.padEnd(Number(((len + 31n) / 32n) * 64n), '0');
+}
+
+function word(value) {
+  return '0x' + BigInt(value).toString(16).padStart(64, '0');
+}
+
+function wordAddress(address) {
+  if (!isAddress(address)) throw new Error('管理员钱包地址不正确');
+  return '0x' + cleanHex(address).padStart(64, '0');
+}
+
+function cleanHex(value) {
+  const compact = String(value || '').replace(/\\s+/g, '').replace(/^0x/i, '');
+  if (!/^[a-fA-F0-9]*$/.test(compact) || compact.length % 2 !== 0) throw new Error('十六进制数据格式不正确');
+  return compact.toLowerCase();
+}
+
+function byteLength(hexValue) {
+  return cleanHex(hexValue).length / 2;
 }
 
 function escapeHtml(value) {
